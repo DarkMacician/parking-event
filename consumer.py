@@ -1,7 +1,7 @@
 from pyspark.sql import SparkSession
 from kafka_data import build_value_df
 from stream_dict import parse_values_df
-from parking_logic import ParkingStateManager, enrich_session_with_realtime_duration
+from processor import ParkingStateManager, enrich_session_with_realtime_duration
 
 all_locations = {
     f"{row}{col}"

@@ -93,6 +93,11 @@ class ParkingEvent:
             # Nếu đã ra, tạo xe mới với vị trí và biển số trống
             self.__init__(occupied_locations, active_license_plates)
 
+    def force_exit(self):
+        """Buộc xe chuyển sang trạng thái MOVING (chuẩn bị ra)"""
+        if self.status == ParkingStatus.PARKED:
+            self.status = ParkingStatus.MOVING
+
     def get_event_info(self):
         """Lấy thông tin sự kiện dưới dạng dictionary"""
         return {
@@ -104,107 +109,37 @@ class ParkingEvent:
         }
 
 
-def parking_stream_realtime(duration_minutes=30, event_interval=3):
+def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="test-topic",
+                            bootstrap_servers="192.168.1.117:9092", exit_interval=30):
     """
-    Mô phỏng streaming các sự kiện đỗ xe trong thời gian thực
+    Streaming parking events vào Kafka với xe ra theo chu kỳ cố định
 
     Args:
         duration_minutes (int): Thời gian chạy streaming (phút)
         event_interval (float): Thời gian trung bình giữa các sự kiện (giây)
+        kafka_topic (str): Tên topic Kafka
+        bootstrap_servers (str): Địa chỉ Kafka server
+        exit_interval (int): Thời gian giữa các lần có xe ra (giây)
     """
-    start_time = time.time()
-    end_time = start_time + (duration_minutes * 60)
-
-    # Theo dõi các vị trí và biển số đang được sử dụng
-    occupied_locations = set()
-    active_license_plates = set()
-
-    # Tạo nhiều xe ngẫu nhiên để mô phỏng bãi đỗ thực tế
-    active_vehicles = []
-    for _ in range(5):
-        vehicle = ParkingEvent(occupied_locations, active_license_plates)
-        active_vehicles.append(vehicle)
-        occupied_locations.add(vehicle.location)
-        active_license_plates.add(vehicle.license_plate)
+    print(f"🔌 Connecting to Kafka: {bootstrap_servers}")
+    print(f"📍 Topic: {kafka_topic}")
 
     try:
-        while time.time() < end_time:
-            # Chọn ngẫu nhiên một xe để cập nhật trạng thái
-            vehicle = random.choice(active_vehicles)
-
-            # Lưu trạng thái, vị trí và biển số cũ
-            old_status = vehicle.status
-            old_location = vehicle.location
-            old_license_plate = vehicle.license_plate
-
-            event_data = vehicle.get_event_info()
-            print(json.dumps(event_data, ensure_ascii=False))
-
-            # Chuyển sang trạng thái tiếp theo
-            vehicle.next_status(occupied_locations, active_license_plates)
-
-            # Quản lý occupied_locations và active_license_plates
-            if old_status == ParkingStatus.EXITING and vehicle.status == ParkingStatus.ENTERING:
-                # Xe tạo mới với vị trí và biển số mới
-                occupied_locations.discard(old_location)
-                occupied_locations.add(vehicle.location)
-                active_license_plates.discard(old_license_plate)
-                active_license_plates.add(vehicle.license_plate)
-            elif vehicle.status == ParkingStatus.EXITING and old_status != ParkingStatus.EXITING:
-                # Xe vừa chuyển sang EXITING - giải phóng vị trí (giữ biển số đến khi xe bị xóa)
-                occupied_locations.discard(vehicle.location)
-
-            # Chỉ in JSON khi xe KHÔNG ở trạng thái PARKED
-            # hoặc khi xe vừa chuyển sang trạng thái PARKED (lần đầu)
-            # if vehicle.status != ParkingStatus.PARKED or old_status != ParkingStatus.PARKED:
-            #                 event_data = vehicle.get_event_info()
-            #                 print(json.dumps(event_data, ensure_ascii=False))
-
-            # Thêm xe mới ngẫu nhiên (mô phỏng xe mới vào bãi)
-            if random.random() > 0.6 and len(active_vehicles) < 8:
-                # Chỉ thêm nếu còn chỗ trống VÀ còn biển số
-                if (len(occupied_locations) < len(ParkingEvent.PARKING_LOCATIONS) and
-                        len(active_license_plates) < len(ParkingEvent.LICENSE_PLATES)):
-                    new_vehicle = ParkingEvent(occupied_locations, active_license_plates)
-                    active_vehicles.append(new_vehicle)
-                    occupied_locations.add(new_vehicle.location)
-                    active_license_plates.add(new_vehicle.license_plate)
-
-            # Xóa xe đã ra khỏi bãi
-            if random.random() > 0.5:
-                vehicles_to_remove = [v for v in active_vehicles if v.status == ParkingStatus.EXITING]
-                for v in vehicles_to_remove:
-                    active_vehicles.remove(v)
-                    occupied_locations.discard(v.location)
-                    active_license_plates.discard(v.license_plate)
-
-            # Đảm bảo luôn có ít nhất 3 xe
-            while (len(active_vehicles) < 3 and
-                   len(occupied_locations) < len(ParkingEvent.PARKING_LOCATIONS) and
-                   len(active_license_plates) < len(ParkingEvent.LICENSE_PLATES)):
-                new_vehicle = ParkingEvent(occupied_locations, active_license_plates)
-                active_vehicles.append(new_vehicle)
-                occupied_locations.add(new_vehicle.location)
-                active_license_plates.add(new_vehicle.license_plate)
-
-            # Delay ngẫu nhiên giữa các sự kiện
-            delay = random.uniform(event_interval * 0.5, event_interval * 1.5)
-            time.sleep(delay)
-
-    except KeyboardInterrupt:
-        pass
-
-
-def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="test-topic",
-                            bootstrap_servers="192.168.1.117:9092"):
-    """Streaming parking events vào Kafka"""
-    producer = KafkaProducer(
-        bootstrap_servers=bootstrap_servers,
-        value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode('utf-8')
-    )
+        producer = KafkaProducer(
+            bootstrap_servers=bootstrap_servers,
+            value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode('utf-8'),
+            acks='all',  # Đợi confirmation từ tất cả replicas
+            retries=3,
+            max_in_flight_requests_per_connection=1
+        )
+        print("✅ Connected to Kafka successfully!")
+    except Exception as e:
+        print(f"❌ Failed to connect to Kafka: {e}")
+        return
 
     start_time = time.time()
     end_time = start_time + (duration_minutes * 60)
+    last_exit_time = start_time  # Thời điểm xe ra gần nhất
 
     occupied_locations = set()
     active_license_plates = set()
@@ -218,6 +153,18 @@ def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="
 
     try:
         while time.time() < end_time:
+            current_time = time.time()
+
+            # Kiểm tra xem đã đến lúc có xe ra chưa (sau mỗi 30s)
+            if current_time - last_exit_time >= exit_interval:
+                # Tìm xe đang PARKED để buộc ra
+                parked_vehicles = [v for v in active_vehicles if v.status == ParkingStatus.PARKED]
+                if parked_vehicles:
+                    vehicle_to_exit = random.choice(parked_vehicles)
+                    vehicle_to_exit.force_exit()
+                    print(f"⏰ [SCHEDULED EXIT] Buộc xe {vehicle_to_exit.license_plate} ra sau {exit_interval}s")
+                    last_exit_time = current_time
+
             vehicle = random.choice(active_vehicles)
             old_status = vehicle.status
             old_location = vehicle.location
@@ -225,10 +172,16 @@ def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="
 
             event_data = vehicle.get_event_info()
 
-            # Gửi dữ liệu vào Kafka
-            producer.send(kafka_topic, value=event_data)
-            producer.flush()
-            print(f"📤 Sent to Kafka: {event_data}")
+            # Gửi dữ liệu vào Kafka với callback
+            try:
+                future = producer.send(kafka_topic, value=event_data)
+                record_metadata = future.get(timeout=10)
+                print(f"📤 Sent to Kafka: {event_data}")
+                print(
+                    f"   ↳ Topic: {record_metadata.topic}, Partition: {record_metadata.partition}, Offset: {record_metadata.offset}")
+            except Exception as e:
+                print(f"❌ Failed to send: {e}")
+                print(f"   Data: {event_data}")
 
             vehicle.next_status(occupied_locations, active_license_plates)
 
@@ -273,5 +226,14 @@ def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="
 
 
 if __name__ == "__main__":
-    # Streaming 30 phút, sự kiện mỗi 3 giây
-    parking_stream_realtime(duration_minutes=30, event_interval=3)
+    # Streaming 30 phút, sự kiện mỗi 3 giây, xe ra mỗi 30 giây
+    print("=" * 60)
+    print("🚗 PARKING EVENT PRODUCER")
+    print("=" * 60)
+    parking_stream_realtime(
+        duration_minutes=30,
+        event_interval=3,
+        kafka_topic="raw-data",  # ← Đổi thành raw-data
+        bootstrap_servers="192.168.1.117:9092",
+        exit_interval=30
+    )
