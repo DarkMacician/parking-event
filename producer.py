@@ -96,7 +96,7 @@ class ParkingEvent:
     def force_exit(self):
         """Buộc xe chuyển sang trạng thái MOVING (chuẩn bị ra)"""
         if self.status == ParkingStatus.PARKED:
-            self.status = ParkingStatus.MOVING
+            self.status = ParkingStatus.EXITING
 
     def get_event_info(self):
         """Lấy thông tin sự kiện dưới dạng dictionary"""
@@ -234,6 +234,6 @@ if __name__ == "__main__":
         duration_minutes=30,
         event_interval=3,
         kafka_topic="raw-data",  # ← Đổi thành raw-data
-        bootstrap_servers="192.168.1.117:9092",
+        bootstrap_servers="192.168.80.60:9092",
         exit_interval=30
     )

@@ -4,16 +4,16 @@ from pyspark.sql.functions import (
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType
 )
-from pyspark.sql.streaming.state import GroupStateTimeout  # ← SỬA IMPORT PATH
+from pyspark.sql.streaming.state import GroupStateTimeout
 import math
 
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
-KAFKA_INPUT_SERVERS = "192.168.1.117:9092"
-KAFKA_OUTPUT_SERVERS = "192.168.1.117:9092"
+KAFKA_INPUT_SERVERS = "192.168.80.60:9092"
+KAFKA_OUTPUT_SERVERS = "192.168.80.60:9092"
 INPUT_TOPIC = "raw-data"
-OUTPUT_TOPIC_SESSIONS = "processed_data"
+OUTPUT_TOPIC_SESSIONS = "processed-data"
 
 CHECKPOINT_BASE = "parking-stateful-checkpoint"
 
@@ -96,13 +96,18 @@ def process_parking_batch(key, pdf_iter, state):
     # Load current state
     if state.exists:
         st = state.get
-        current_state = {
-            "plate": st["license_plate"][0],
-            "location": st["location"][0],
-            "start_time": st["start_time"][0],
-            "last_time": st["last_time"][0],
-            "status": st["status"][0]
-        }
+        # Kiểm tra nếu start_time là None thì coi như không có state hợp lệ
+        if st[2] is not None:
+            current_state = {
+                "plate": st[0],
+                "location": st[1],
+                "start_time": st[2],
+                "last_time": st[3],
+                "status": st[4]
+            }
+        else:
+            current_state = None
+            state.remove()
     else:
         current_state = None
 
@@ -117,9 +122,23 @@ def process_parking_batch(key, pdf_iter, state):
             location = row["location"]
             ts_unix = row["timestamp_unix"]
 
-            # PARKED
-            if status_code == "PARKED":
+            # ENTERING - Khởi tạo session mới
+            if status_code == "ENTERING":
                 if current_state is None or current_state["status"] == "CLOSED":
+                    current_state = {
+                        "plate": license_plate,
+                        "location": location,
+                        "start_time": ts_unix,
+                        "last_time": ts_unix,
+                        "status": "ENTERING"
+                    }
+                else:
+                    current_state["last_time"] = ts_unix
+
+            # PARKED - Cập nhật trạng thái đỗ
+            elif status_code == "PARKED":
+                if current_state is None or current_state["status"] == "CLOSED":
+                    # Trường hợp xe chưa có ENTERING, khởi tạo luôn với PARKED
                     current_state = {
                         "plate": license_plate,
                         "location": location,
@@ -128,25 +147,42 @@ def process_parking_batch(key, pdf_iter, state):
                         "status": "ACTIVE"
                     }
                 else:
+                    # Cập nhật từ ENTERING sang ACTIVE
+                    current_state["status"] = "ACTIVE"
+                    current_state["location"] = location
+                    current_state["last_time"] = ts_unix
+                    # Nếu start_time bị None, set lại
+                    if current_state["start_time"] is None:
+                        current_state["start_time"] = ts_unix
+
+                # Tính toán và emit kết quả ACTIVE (kiểm tra start_time trước)
+                if current_state["start_time"] is not None:
+                    duration = ts_unix - current_state["start_time"]
+                    cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
+
+                    results.append({
+                        "license_plate": license_plate,
+                        "location": location,
+                        "start_time": current_state["start_time"],
+                        "end_time": ts_unix,
+                        "duration": duration,
+                        "cost": cost,
+                        "status": "ACTIVE",
+                        "last_updated": ts_unix
+                    })
+
+            # MOVING - Xe đang di chuyển để ra
+            elif status_code == "MOVING":
+                if current_state is not None and current_state["status"] == "ACTIVE":
+                    current_state["status"] = "MOVING"
                     current_state["last_time"] = ts_unix
 
-                duration = ts_unix - current_state["start_time"]
-                cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
-
-                results.append({
-                    "license_plate": license_plate,
-                    "location": location,
-                    "start_time": current_state["start_time"],
-                    "end_time": ts_unix,
-                    "duration": duration,
-                    "cost": cost,
-                    "status": "ACTIVE",
-                    "last_updated": ts_unix
-                })
-
-            # EXITING
-            elif status_code == "EXITING" and current_state is not None:
-                if current_state["status"] == "ACTIVE":
+            # EXITING - Kết thúc session
+            elif status_code == "EXITING":
+                if (current_state is not None and 
+                    current_state.get("start_time") is not None and 
+                    current_state["status"] in ["ACTIVE", "MOVING"]):
+                    
                     duration = ts_unix - current_state["start_time"]
                     cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
 
@@ -162,19 +198,25 @@ def process_parking_batch(key, pdf_iter, state):
                     })
 
                     current_state["status"] = "CLOSED"
+                # Nếu không có state hợp lệ, bỏ qua event EXITING này
 
     # Set timeout BEFORE updating state (required for ProcessingTimeTimeout)
     state.setTimeoutDuration(3600000)  # 1 hour
 
     # Update or remove state
-    if current_state is not None and current_state["status"] == "ACTIVE":
-        state.update(pd.DataFrame([{
-            "license_plate": current_state["plate"],
-            "location": current_state["location"],
-            "start_time": current_state["start_time"],
-            "last_time": current_state["last_time"],
-            "status": current_state["status"]
-        }]))
+    if current_state is not None and current_state["status"] in ["ACTIVE", "ENTERING", "MOVING"]:
+        # Đảm bảo start_time không None trước khi lưu
+        if current_state.get("start_time") is not None:
+            state.update(pd.DataFrame([{
+                "license_plate": current_state["plate"],
+                "location": current_state["location"],
+                "start_time": current_state["start_time"],
+                "last_time": current_state["last_time"],
+                "status": current_state["status"]
+            }]))
+        else:
+            # Nếu start_time None, xóa state
+            state.remove()
     elif current_state is not None and current_state["status"] == "CLOSED":
         state.remove()
 

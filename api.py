@@ -15,7 +15,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
-KAFKA_SERVERS = "192.168.1.117:9092"
+KAFKA_SERVERS = "192.168.80.60:9092"
 PROCESSED_TOPIC = "processed-data"
 BLOCK_PRICE = 10000
 BLOCK_SECONDS = 600
@@ -219,23 +219,63 @@ def get_location_info(location_id):
     return jsonify(info)
 
 
+# @app.route('/api/locations/free', methods=['GET'])
+# def get_free_locations():
+#     """GET /api/locations/free - Lấy danh sách vị trí trống"""
+#     free_locs = manager.get_free_locations()
+#     return jsonify({
+#         "free_locations": free_locs,
+#         "count": len(free_locs)
+#     })
+
 @app.route('/api/locations/free', methods=['GET'])
 def get_free_locations():
-    """GET /api/locations/free - Lấy danh sách vị trí trống"""
-    free_locs = manager.get_free_locations()
+    """GET /api/locations/free - Lấy danh sách vị trí trống (bao gồm vị trí CLOSED)"""
+    with manager.lock:
+        # FREE = ALL - OCCUPIED (đã loại CLOSED)
+        free_locs = sorted(list(ALL_LOCATIONS - manager.occupancy))
+
     return jsonify({
         "free_locations": free_locs,
         "count": len(free_locs)
     })
 
 
+
+# @app.route('/api/locations/busy', methods=['GET'])
+# def get_busy_locations():
+#     """GET /api/locations/busy - Lấy danh sách vị trí đang bận"""
+#     busy_locs = manager.get_busy_locations()
+#     return jsonify({
+#         "busy_locations": busy_locs,
+#         "count": len(busy_locs)
+#     })
+
 @app.route('/api/locations/busy', methods=['GET'])
 def get_busy_locations():
-    """GET /api/locations/busy - Lấy danh sách vị trí đang bận"""
-    busy_locs = manager.get_busy_locations()
+    """GET /api/locations/busy - Lấy danh sách vị trí đang bận cùng session ACTIVE"""
+    busy_locations = []
+
+    current_time = int(time.time())
+
+    with manager.lock:
+        for plate, sess in manager.active_sessions.items():
+            loc = sess.get("location")
+            start_time = sess.get("start_time", current_time)
+            duration = current_time - start_time
+            cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
+
+            busy_locations.append({
+                "location": loc,
+                "license_plate": plate,
+                "start_time": start_time,
+                "duration": duration,
+                "cost": cost
+            })
+
     return jsonify({
-        "busy_locations": busy_locs,
-        "count": len(busy_locs)
+        "busy_locations": busy_locations,
+        "count": len(busy_locations)
     })
 
 
