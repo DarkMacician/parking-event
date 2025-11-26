@@ -263,15 +263,9 @@ def get_busy_locations():
             loc = sess.get("location")
             start_time = sess.get("start_time", current_time)
             duration = current_time - start_time
-            cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
+            #cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
 
-            busy_locations.append({
-                "location": loc,
-                "license_plate": plate,
-                "start_time": start_time,
-                "duration": duration,
-                "cost": cost
-            })
+            busy_locations.append(loc)
 
     return jsonify({
         "busy_locations": busy_locations,

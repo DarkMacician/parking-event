@@ -10,8 +10,8 @@ import math
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
-KAFKA_INPUT_SERVERS = "192.168.80.60:9092"
-KAFKA_OUTPUT_SERVERS = "192.168.80.60:9092"
+KAFKA_INPUT_SERVERS = "192.168.1.117:9092"
+KAFKA_OUTPUT_SERVERS = "192.168.1.117:9092"
 INPUT_TOPIC = "raw-data"
 OUTPUT_TOPIC_SESSIONS = "processed-data"
 
@@ -113,6 +113,34 @@ def process_parking_batch(key, pdf_iter, state):
 
     results = []
 
+    # --- Xử lý đóng session khi timeout ---
+    if state.hasTimedOut:
+        if current_state is not None and current_state.get("start_time") is not None and current_state["status"] != "CLOSED":
+            # Tính toán đóng session với last_time làm end_time
+            duration = current_state["last_time"] - current_state["start_time"]
+            cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
+
+            results.append({
+                "license_plate": license_plate,
+                "location": current_state["location"],
+                "start_time": current_state["start_time"],
+                "end_time": current_state["last_time"],
+                "duration": duration,
+                "cost": cost,
+                "status": "CLOSED",
+                "last_updated": current_state["last_time"]
+            })
+        state.remove()
+        # Yield kết quả đóng session và return luôn
+        if results:
+            yield pd.DataFrame(results)
+        else:
+            yield pd.DataFrame(columns=[
+                "license_plate", "location", "start_time", "end_time",
+                "duration", "cost", "status", "last_updated"
+            ])
+        return
+
     # CRITICAL: Must iterate through ALL batches in the iterator
     for events_pdf in pdf_iter:
         events_pdf = events_pdf.sort_values("timestamp_unix")
@@ -201,7 +229,7 @@ def process_parking_batch(key, pdf_iter, state):
                 # Nếu không có state hợp lệ, bỏ qua event EXITING này
 
     # Set timeout BEFORE updating state (required for ProcessingTimeTimeout)
-    state.setTimeoutDuration(3600000)  # 1 hour
+    state.setTimeoutDuration(120)  # 1 hour
 
     # Update or remove state
     if current_state is not None and current_state["status"] in ["ACTIVE", "ENTERING", "MOVING"]:
@@ -222,7 +250,15 @@ def process_parking_batch(key, pdf_iter, state):
 
     # CRITICAL: Must YIELD, not RETURN
     if results:
-        yield pd.DataFrame(results)
+        df = pd.DataFrame(results)
+        if not df.empty:
+            newest = df.loc[df['last_updated'].idxmax()]
+            yield pd.DataFrame([newest])
+        else:
+            yield pd.DataFrame(columns=[
+                "license_plate", "location", "start_time", "end_time",
+                "duration", "cost", "status", "last_updated"
+            ])
     else:
         yield pd.DataFrame(columns=[
             "license_plate", "location", "start_time", "end_time",
