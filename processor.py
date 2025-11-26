@@ -10,8 +10,8 @@ import math
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
-KAFKA_INPUT_SERVERS = "192.168.1.117:9092"
-KAFKA_OUTPUT_SERVERS = "192.168.1.117:9092"
+KAFKA_INPUT_SERVERS = "192.168.80.60:9092"
+KAFKA_OUTPUT_SERVERS = "192.168.80.60:9092"
 INPUT_TOPIC = "raw-data"
 OUTPUT_TOPIC_SESSIONS = "processed-data"
 
@@ -115,7 +115,8 @@ def process_parking_batch(key, pdf_iter, state):
 
     # --- Xử lý đóng session khi timeout ---
     if state.hasTimedOut:
-        if current_state is not None and current_state.get("start_time") is not None and current_state["status"] != "CLOSED":
+        if current_state is not None and current_state.get("start_time") is not None and current_state[
+            "status"] != "CLOSED":
             # Tính toán đóng session với last_time làm end_time
             duration = current_state["last_time"] - current_state["start_time"]
             cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
@@ -207,10 +208,9 @@ def process_parking_batch(key, pdf_iter, state):
 
             # EXITING - Kết thúc session
             elif status_code == "EXITING":
-                if (current_state is not None and 
-                    current_state.get("start_time") is not None and 
-                    current_state["status"] in ["ACTIVE", "MOVING"]):
-                    
+                if (current_state is not None and
+                        current_state.get("start_time") is not None and
+                        current_state["status"] in ["ACTIVE", "MOVING"]):
                     duration = ts_unix - current_state["start_time"]
                     cost = math.ceil(duration / BLOCK_SECONDS) * BLOCK_PRICE
 
@@ -229,7 +229,7 @@ def process_parking_batch(key, pdf_iter, state):
                 # Nếu không có state hợp lệ, bỏ qua event EXITING này
 
     # Set timeout BEFORE updating state (required for ProcessingTimeTimeout)
-    state.setTimeoutDuration(120)  # 1 hour
+    state.setTimeoutDuration(10)  # 1 hour
 
     # Update or remove state
     if current_state is not None and current_state["status"] in ["ACTIVE", "ENTERING", "MOVING"]:
@@ -280,6 +280,12 @@ stateful_sessions = (
         timeoutConf=GroupStateTimeout.ProcessingTimeTimeout
     )
 )
+
+occupied_query = stateful_sessions.writeStream \
+    .outputMode("update") \
+    .trigger(processingTime="1 second") \
+    .option("checkpointLocation", f"{CHECKPOINT_BASE}/occupied_locations") \
+    .start()
 
 # ==========================================================
 # Write to Kafka

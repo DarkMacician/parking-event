@@ -118,6 +118,8 @@ def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="
         print(f"❌ Failed to connect to Kafka: {e}")
         return
 
+    all_vehicles = {}
+
     start_time = time.time()
     end_time = start_time + (duration_minutes * 60)
     last_exit_time = start_time
@@ -131,6 +133,7 @@ def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="
         active_vehicles.append(vehicle)
         occupied_locations.add(vehicle.location)
         active_license_plates.add(vehicle.license_plate)
+        all_vehicles[vehicle.license_plate] = vehicle
 
     try:
         while time.time() < end_time:
@@ -140,16 +143,29 @@ def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="
                 parked_vehicles = [v for v in active_vehicles if v.status == ParkingStatus.PARKED]
                 if parked_vehicles:
                     vehicle_to_exit = random.choice(parked_vehicles)
+                    # 1. Chuyển trạng thái sang EXITING
                     vehicle_to_exit.force_exit()
                     print(f"⏰ [SCHEDULED EXIT] Buộc xe {vehicle_to_exit.license_plate} ra sau {exit_interval}s")
+                    # 2. Gửi sự kiện EXITING thực tế lên Kafka
+                    event_data = vehicle_to_exit.get_event_info()
+                    try:
+                        future = producer.send(kafka_topic, value=event_data)
+                        record_metadata = future.get(timeout=10)
+                        print(f"📤 [SENT EXITING] Sent to Kafka: {event_data}")
+                        print(
+                            f"   ↳ Topic: {record_metadata.topic}, Partition: {record_metadata.partition}, Offset: {record_metadata.offset}")
+                    except Exception as e:
+                        print(f"❌ Failed to send scheduled exit: {e}")
+                        print(f"   Data: {event_data}")
                     last_exit_time = current_time
 
             vehicle = random.choice(active_vehicles)
             old_status = vehicle.status
             old_location = vehicle.location
             old_license_plate = vehicle.license_plate
-
             event_data = vehicle.get_event_info()
+            all_vehicles[vehicle.license_plate] = vehicle
+
             try:
                 future = producer.send(kafka_topic, value=event_data)
                 record_metadata = future.get(timeout=10)
@@ -196,19 +212,21 @@ def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="
             delay = random.uniform(event_interval * 0.5, event_interval * 1.5)
             time.sleep(delay)
 
-        print("\n⛔ Hết thời gian streaming, gửi sự kiện EXITING cho các xe còn đang đỗ...")
-        for vehicle in list(active_vehicles):
+        print(">>> Danh sách biển số và status cuối trong all_vehicles trước khi gửi EXITING:")
+        for plate, v in all_vehicles.items():
+            print(f"- {plate}: {v.location}, {v.status}")
+
+        print("\n⛔ Kết thúc streaming, quét toàn bộ xe gửi EXITING cho tất cả xe còn đang đỗ...")
+        for plate, vehicle in all_vehicles.items():
             if vehicle.status == ParkingStatus.PARKED:
                 vehicle.force_exit()
                 event_data = vehicle.get_event_info()
                 try:
                     future = producer.send(kafka_topic, value=event_data)
                     record_metadata = future.get(timeout=10)
-                    print(f"📤 [FORCED EXIT AT END] Sent to Kafka: {event_data}")
+                    print(f"📤 [FORCED EXIT at END-FLUSH] Sent to Kafka: {event_data}")
                     print(
-                        f"   ↳ Topic: {record_metadata.topic}, "
-                        f"Partition: {record_metadata.partition}, "
-                        f"Offset: {record_metadata.offset}"
+                        f"   ↳ Topic: {record_metadata.topic}, Partition: {record_metadata.partition}, Offset: {record_metadata.offset}"
                     )
                 except Exception as e:
                     print(f"❌ Failed to send forced-exit event: {e}")
@@ -229,9 +247,9 @@ if __name__ == "__main__":
     print("🚗 PARKING EVENT PRODUCER")
     print("=" * 60)
     parking_stream_realtime(
-        duration_minutes=30,
-        event_interval=3,
+        duration_minutes=1,
+        event_interval=1,
         kafka_topic="raw-data",
-        bootstrap_servers="192.168.1.117:9092",
+        bootstrap_servers="192.168.80.60:9092",
         exit_interval=30
     )
