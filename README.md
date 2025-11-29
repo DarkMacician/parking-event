@@ -192,12 +192,12 @@ docker exec -it spark-master bash -c "... spark-submit ... /opt/spark-apps/task.
 
 5. Run the producer:
 ```bash
-python producer/producer.py
+producer.py
 ```
 
 6. Run the API:
 ```bash
-python api/app.py
+api.py
 ```
 
 Once all three parts are running:
