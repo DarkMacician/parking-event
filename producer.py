@@ -1,9 +1,24 @@
 import time
 import random
-import json
 from datetime import datetime
 from enum import Enum
 from kafka import KafkaProducer
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import signal
+import sys
+import json
+
+def load_config(path="config.json"):
+    with open(path, "r") as f:
+        return json.load(f)
+
+config = load_config()
+
+NUM_CAMERAS = int(config.get("num_cameras"))
+DURATION_MINUTES = int(config.get("duration_minutes"))
+KAFKA_TOPIC = config.get("kafka_topic")
+KAFKA_SERVERS = config.get("kafka_servers")
 
 
 class ParkingStatus(Enum):
@@ -35,7 +50,7 @@ class ParkingEvent:
         "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10"
     ]
 
-    def __init__(self, occupied_locations=None, active_license_plates=None):
+    def __init__(self, occupied_locations=None, active_license_plates=None, allowed_locations=None):
         if active_license_plates:
             available_plates = [plate for plate in self.LICENSE_PLATES if plate not in active_license_plates]
             if available_plates:
@@ -45,20 +60,22 @@ class ParkingEvent:
         else:
             self.license_plate = random.choice(self.LICENSE_PLATES)
 
+        location_pool = allowed_locations if allowed_locations else self.PARKING_LOCATIONS
+
         if occupied_locations:
-            available_locations = [loc for loc in self.PARKING_LOCATIONS if loc not in occupied_locations]
+            available_locations = [loc for loc in location_pool if loc not in occupied_locations]
             if available_locations:
                 self.location = random.choice(available_locations)
             else:
-                self.location = random.choice(self.PARKING_LOCATIONS)
+                self.location = random.choice(location_pool)
         else:
-            self.location = random.choice(self.PARKING_LOCATIONS)
+            self.location = random.choice(location_pool)
 
         self.status = ParkingStatus.ENTERING
         self.parked_count = 0
         self.parked_duration = 0
 
-    def next_status(self, occupied_locations=None, active_license_plates=None):
+    def next_status(self, occupied_locations=None, active_license_plates=None, allowed_locations=None):
         if self.status == ParkingStatus.ENTERING:
             self.status = ParkingStatus.PARKED
             self.parked_duration = random.randint(20, 200)
@@ -74,7 +91,7 @@ class ParkingEvent:
             self.status = ParkingStatus.EXITING
 
         else:
-            self.__init__(occupied_locations, active_license_plates)
+            self.__init__(occupied_locations, active_license_plates, allowed_locations)
 
     def force_exit(self):
         if self.status == ParkingStatus.PARKED:
@@ -90,166 +107,330 @@ class ParkingEvent:
         }
 
 
-def parking_stream_realtime(duration_minutes=30, event_interval=3, kafka_topic="test-topic",
-                            bootstrap_servers="192.168.1.117:9092", exit_interval=30):
-    """
-    Streaming parking events vào Kafka với xe ra theo chu kỳ cố định
+class CameraSimulator:
+    """Giả lập 1 camera giám sát một khu vực trong bãi đỗ"""
 
-    Args:
-        duration_minutes (int): Thời gian chạy streaming (phút)
-        event_interval (float): Thời gian trung bình giữa các sự kiện (giây)
-        kafka_topic (str): Tên topic Kafka
-        bootstrap_servers (str): Địa chỉ Kafka server
-        exit_interval (int): Thời gian giữa các lần có xe ra (giây)
-    """
-    print(f"🔌 Connecting to Kafka: {bootstrap_servers}")
-    print(f"📍 Topic: {kafka_topic}")
+    def __init__(self, camera_id, allowed_locations, producer, kafka_topic,
+                 event_interval=3, exit_interval=30):
+        self.camera_id = camera_id
+        self.allowed_locations = allowed_locations
+        self.producer = producer
+        self.kafka_topic = kafka_topic
+        self.event_interval = event_interval
+        self.exit_interval = exit_interval
 
-    try:
-        producer = KafkaProducer(
-            bootstrap_servers=bootstrap_servers,
-            value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode('utf-8'),
-            acks='all',
-            retries=3,
-            max_in_flight_requests_per_connection=1
-        )
-        print("✅ Connected to Kafka successfully!")
-    except Exception as e:
-        print(f"❌ Failed to connect to Kafka: {e}")
-        return
+        self.occupied_locations = set()
+        self.active_license_plates = set()
+        self.active_vehicles = []
+        self.all_vehicles = {}
 
-    all_vehicles = {}
+        self.running = True
+        self.lock = threading.Lock()
 
-    start_time = time.time()
-    end_time = start_time + (duration_minutes * 60)
-    last_exit_time = start_time
+    def initialize_vehicles(self, num_initial=3):
+        """Khởi tạo một số xe ban đầu"""
+        with self.lock:
+            for _ in range(num_initial):
+                vehicle = ParkingEvent(
+                    self.occupied_locations,
+                    self.active_license_plates,
+                    self.allowed_locations
+                )
+                self.active_vehicles.append(vehicle)
+                self.occupied_locations.add(vehicle.location)
+                self.active_license_plates.add(vehicle.license_plate)
+                self.all_vehicles[vehicle.license_plate] = vehicle
 
-    occupied_locations = set()
-    active_license_plates = set()
-    active_vehicles = []
+    def send_event(self, event_data, event_type="NORMAL"):
+        """Gửi event lên Kafka với KEY = license_plate"""
+        try:
+            # QUAN TRỌNG: Gửi với key=license_plate để đảm bảo partition consistency
+            future = self.producer.send(
+                self.kafka_topic,
+                key=event_data["license_plate"].encode('utf-8'),
+                value=event_data
+            )
+            record_metadata = future.get(timeout=10)
 
-    for _ in range(5):
-        vehicle = ParkingEvent(occupied_locations, active_license_plates)
-        active_vehicles.append(vehicle)
-        occupied_locations.add(vehicle.location)
-        active_license_plates.add(vehicle.license_plate)
-        all_vehicles[vehicle.license_plate] = vehicle
+            prefix = "📤" if event_type == "NORMAL" else "🔴"
+            print(f"{prefix} [Camera {self.camera_id}] {event_type}: {event_data['license_plate']} "
+                  f"@ {event_data['location']} - {event_data['status_code']}")
+            print(f"   ↳ Partition: {record_metadata.partition}, Offset: {record_metadata.offset}")
 
-    try:
-        while time.time() < end_time:
-            current_time = time.time()
+        except Exception as e:
+            print(f"❌ [Camera {self.camera_id}] Failed to send: {e}")
 
-            if current_time - last_exit_time >= exit_interval:
-                parked_vehicles = [v for v in active_vehicles if v.status == ParkingStatus.PARKED]
-                if parked_vehicles:
-                    vehicle_to_exit = random.choice(parked_vehicles)
-                    # 1. Chuyển trạng thái sang EXITING
-                    vehicle_to_exit.force_exit()
-                    print(f"⏰ [SCHEDULED EXIT] Buộc xe {vehicle_to_exit.license_plate} ra sau {exit_interval}s")
-                    # 2. Gửi sự kiện EXITING thực tế lên Kafka
-                    event_data = vehicle_to_exit.get_event_info()
-                    try:
-                        future = producer.send(kafka_topic, value=event_data)
-                        record_metadata = future.get(timeout=10)
-                        print(f"📤 [SENT EXITING] Sent to Kafka: {event_data}")
-                        print(
-                            f"   ↳ Topic: {record_metadata.topic}, Partition: {record_metadata.partition}, Offset: {record_metadata.offset}")
-                    except Exception as e:
-                        print(f"❌ Failed to send scheduled exit: {e}")
-                        print(f"   Data: {event_data}")
-                    last_exit_time = current_time
+    def process_scheduled_exit(self, last_exit_time):
+        """Xử lý xe ra theo lịch định kỳ"""
+        with self.lock:
+            parked_vehicles = [v for v in self.active_vehicles if v.status == ParkingStatus.PARKED]
+            if parked_vehicles:
+                vehicle_to_exit = random.choice(parked_vehicles)
+                vehicle_to_exit.force_exit()
+                event_data = vehicle_to_exit.get_event_info()
+                self.send_event(event_data, "SCHEDULED_EXIT")
+                return True
+        return False
 
-            vehicle = random.choice(active_vehicles)
+    def process_normal_event(self):
+        """Xử lý sự kiện bình thường"""
+        with self.lock:
+            if not self.active_vehicles:
+                return
+
+            vehicle = random.choice(self.active_vehicles)
             old_status = vehicle.status
             old_location = vehicle.location
             old_license_plate = vehicle.license_plate
+
             event_data = vehicle.get_event_info()
-            all_vehicles[vehicle.license_plate] = vehicle
+            self.all_vehicles[vehicle.license_plate] = vehicle
 
-            try:
-                future = producer.send(kafka_topic, value=event_data)
-                record_metadata = future.get(timeout=10)
-                print(f"📤 Sent to Kafka: {event_data}")
-                print(
-                    f"   ↳ Topic: {record_metadata.topic}, Partition: {record_metadata.partition}, Offset: {record_metadata.offset}")
-            except Exception as e:
-                print(f"❌ Failed to send: {e}")
-                print(f"   Data: {event_data}")
+            self.send_event(event_data)
 
-            vehicle.next_status(occupied_locations, active_license_plates)
+            vehicle.next_status(
+                self.occupied_locations,
+                self.active_license_plates,
+                self.allowed_locations
+            )
 
+            # Cập nhật occupied locations
             if old_status == ParkingStatus.EXITING and vehicle.status == ParkingStatus.ENTERING:
-                occupied_locations.discard(old_location)
-                occupied_locations.add(vehicle.location)
-                active_license_plates.discard(old_license_plate)
-                active_license_plates.add(vehicle.license_plate)
+                self.occupied_locations.discard(old_location)
+                self.occupied_locations.add(vehicle.location)
+                self.active_license_plates.discard(old_license_plate)
+                self.active_license_plates.add(vehicle.license_plate)
             elif vehicle.status == ParkingStatus.EXITING and old_status != ParkingStatus.EXITING:
-                occupied_locations.discard(vehicle.location)
+                self.occupied_locations.discard(vehicle.location)
 
-            if random.random() > 0.6 and len(active_vehicles) < 8:
-                if (len(occupied_locations) < len(ParkingEvent.PARKING_LOCATIONS) and
-                        len(active_license_plates) < len(ParkingEvent.LICENSE_PLATES)):
-                    new_vehicle = ParkingEvent(occupied_locations, active_license_plates)
-                    active_vehicles.append(new_vehicle)
-                    occupied_locations.add(new_vehicle.location)
-                    active_license_plates.add(new_vehicle.license_plate)
-
-            if random.random() > 0.5:
-                vehicles_to_remove = [v for v in active_vehicles if v.status == ParkingStatus.EXITING]
-                for v in vehicles_to_remove:
-                    active_vehicles.remove(v)
-                    occupied_locations.discard(v.location)
-                    active_license_plates.discard(v.license_plate)
-
-            while (len(active_vehicles) < 3 and
-                   len(occupied_locations) < len(ParkingEvent.PARKING_LOCATIONS) and
-                   len(active_license_plates) < len(ParkingEvent.LICENSE_PLATES)):
-                new_vehicle = ParkingEvent(occupied_locations, active_license_plates)
-                active_vehicles.append(new_vehicle)
-                occupied_locations.add(new_vehicle.location)
-                active_license_plates.add(new_vehicle.license_plate)
-
-            delay = random.uniform(event_interval * 0.5, event_interval * 1.5)
-            time.sleep(delay)
-
-        print(">>> Danh sách biển số và status cuối trong all_vehicles trước khi gửi EXITING:")
-        for plate, v in all_vehicles.items():
-            print(f"- {plate}: {v.location}, {v.status}")
-
-        print("\n⛔ Kết thúc streaming, quét toàn bộ xe gửi EXITING cho tất cả xe còn đang đỗ...")
-        for plate, vehicle in all_vehicles.items():
-            if vehicle.status == ParkingStatus.PARKED:
-                vehicle.force_exit()
-                event_data = vehicle.get_event_info()
-                try:
-                    future = producer.send(kafka_topic, value=event_data)
-                    record_metadata = future.get(timeout=10)
-                    print(f"📤 [FORCED EXIT at END-FLUSH] Sent to Kafka: {event_data}")
-                    print(
-                        f"   ↳ Topic: {record_metadata.topic}, Partition: {record_metadata.partition}, Offset: {record_metadata.offset}"
+            # Thêm xe mới ngẫu nhiên
+            if random.random() > 0.6 and len(self.active_vehicles) < 8:
+                if (len(self.occupied_locations) < len(self.allowed_locations) and
+                    len(self.active_license_plates) < len(ParkingEvent.LICENSE_PLATES)):
+                    new_vehicle = ParkingEvent(
+                        self.occupied_locations,
+                        self.active_license_plates,
+                        self.allowed_locations
                     )
-                except Exception as e:
-                    print(f"❌ Failed to send forced-exit event: {e}")
-                    print(f"   Data: {event_data}")
+                    self.active_vehicles.append(new_vehicle)
+                    self.occupied_locations.add(new_vehicle.location)
+                    self.active_license_plates.add(new_vehicle.license_plate)
 
-    except KeyboardInterrupt:
-        print("\n🛑 Stopped streaming.")
-    finally:
+            # Xóa xe đã ra
+            if random.random() > 0.5:
+                vehicles_to_remove = [v for v in self.active_vehicles if v.status == ParkingStatus.EXITING]
+                for v in vehicles_to_remove:
+                    self.active_vehicles.remove(v)
+                    self.occupied_locations.discard(v.location)
+                    self.active_license_plates.discard(v.license_plate)
+
+            # Duy trì số lượng xe tối thiểu
+            while (len(self.active_vehicles) < 3 and
+                   len(self.occupied_locations) < len(self.allowed_locations) and
+                   len(self.active_license_plates) < len(ParkingEvent.LICENSE_PLATES)):
+                new_vehicle = ParkingEvent(
+                    self.occupied_locations,
+                    self.active_license_plates,
+                    self.allowed_locations
+                )
+                self.active_vehicles.append(new_vehicle)
+                self.occupied_locations.add(new_vehicle.location)
+                self.active_license_plates.add(new_vehicle.license_plate)
+
+    def flush_all_vehicles(self):
+        """Gửi EXITING cho tất cả xe còn đang đỗ"""
+        print(f"\n[Camera {self.camera_id}] Flushing all parked vehicles...")
+        with self.lock:
+            for plate, vehicle in self.all_vehicles.items():
+                if vehicle.status == ParkingStatus.PARKED:
+                    vehicle.force_exit()
+                    event_data = vehicle.get_event_info()
+                    self.send_event(event_data, "FORCED_EXIT")
+
+    def run(self, duration_seconds):
+        """Chạy camera simulator"""
+        print(f"🎥 [Camera {self.camera_id}] Started - Monitoring locations: {self.allowed_locations[:5]}...")
+
+        self.initialize_vehicles()
+
+        start_time = time.time()
+        end_time = start_time + duration_seconds
+        last_exit_time = start_time
+
         try:
-            producer.flush()
+            while time.time() < end_time and self.running:
+                current_time = time.time()
+
+                # Xử lý scheduled exit
+                if current_time - last_exit_time >= self.exit_interval:
+                    if self.process_scheduled_exit(last_exit_time):
+                        last_exit_time = current_time
+
+                # Xử lý event bình thường
+                self.process_normal_event()
+
+                # Sleep
+                delay = random.uniform(self.event_interval * 0.5, self.event_interval * 1.5)
+                time.sleep(delay)
+
+            # Flush tất cả xe khi kết thúc
+            if self.running:
+                self.flush_all_vehicles()
+
         except Exception as e:
-            print(f"⚠️ Error on flush: {e}")
-        producer.close()
+            print(f"❌ [Camera {self.camera_id}] Error: {e}")
+        finally:
+            print(f"🎥 [Camera {self.camera_id}] Stopped")
+
+    def stop(self):
+        """Dừng camera"""
+        self.running = False
+
+
+class MultiCameraProducer:
+    """Quản lý nhiều cameras"""
+
+    def __init__(self, num_cameras, kafka_topic, bootstrap_servers, duration_minutes=2):
+        self.num_cameras = num_cameras
+        self.kafka_topic = kafka_topic
+        self.bootstrap_servers = bootstrap_servers
+        self.duration_minutes = duration_minutes
+        self.cameras = []
+        self.producer = None
+        self.running = True
+
+        # Setup signal handler
+        signal.signal(signal.SIGINT, self.signal_handler)
+
+    def signal_handler(self, sig, frame):
+        """Xử lý Ctrl+C"""
+        print("\n\n⚠️  Received stop signal, shutting down cameras...")
+        self.stop_all_cameras()
+        sys.exit(0)
+
+    def setup_producer(self):
+        """Khởi tạo Kafka producer"""
+        print(f"🔌 Connecting to Kafka: {self.bootstrap_servers}")
+        print(f"📍 Topic: {self.kafka_topic}")
+
+        try:
+            self.producer = KafkaProducer(
+                bootstrap_servers=self.bootstrap_servers,
+                value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode('utf-8'),
+                key_serializer=lambda k: k if isinstance(k, bytes) else k.encode('utf-8'),
+                acks='all',
+                retries=3,
+                max_in_flight_requests_per_connection=1
+            )
+            print("✅ Connected to Kafka successfully!\n")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to connect to Kafka: {e}")
+            return False
+
+    def divide_locations(self):
+        """Chia locations cho từng camera"""
+        all_locations = ParkingEvent.PARKING_LOCATIONS
+        locations_per_camera = len(all_locations) // self.num_cameras
+
+        camera_locations = []
+        for i in range(self.num_cameras):
+            start_idx = i * locations_per_camera
+            if i == self.num_cameras - 1:  # Camera cuối nhận hết còn lại
+                end_idx = len(all_locations)
+            else:
+                end_idx = (i + 1) * locations_per_camera
+
+            camera_locations.append(all_locations[start_idx:end_idx])
+
+        return camera_locations
+
+    def create_cameras(self):
+        """Tạo các camera simulators"""
+        camera_locations = self.divide_locations()
+
+        for i in range(self.num_cameras):
+            camera = CameraSimulator(
+                camera_id=i + 1,
+                allowed_locations=camera_locations[i],
+                producer=self.producer,
+                kafka_topic=self.kafka_topic,
+                event_interval=2,  # Mỗi camera gửi event mỗi ~2s
+                exit_interval=30   # Xe ra mỗi 30s
+            )
+            self.cameras.append(camera)
+
+        print(f"✅ Created {self.num_cameras} cameras")
+        for i, camera in enumerate(self.cameras):
+            print(f"   Camera {i+1}: {len(camera.allowed_locations)} locations "
+                  f"({camera.allowed_locations[0]} - {camera.allowed_locations[-1]})")
+        print()
+
+    def run(self):
+        """Chạy tất cả cameras"""
+        if not self.setup_producer():
+            return
+
+        self.create_cameras()
+
+        duration_seconds = self.duration_minutes * 60
+
+        print(f"🚀 Starting {self.num_cameras} cameras for {self.duration_minutes} minutes...")
+        print(f"{'='*80}\n")
+
+        # Chạy cameras trong threads
+        with ThreadPoolExecutor(max_workers=self.num_cameras) as executor:
+            futures = [
+                executor.submit(camera.run, duration_seconds)
+                for camera in self.cameras
+            ]
+
+            # Đợi tất cả cameras hoàn thành
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"❌ Camera error: {e}")
+
+        print(f"\n{'='*80}")
+        print("✅ All cameras finished")
+
+        # Flush và đóng producer
+        try:
+            self.producer.flush()
+            time.sleep(2)  # Đợi flush hoàn tất
+        except Exception as e:
+            print(f"⚠️  Error on flush: {e}")
+        finally:
+            self.producer.close()
+            print("✅ Kafka producer closed")
+
+    def stop_all_cameras(self):
+        """Dừng tất cả cameras"""
+        for camera in self.cameras:
+            camera.stop()
 
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🚗 PARKING EVENT PRODUCER")
-    print("=" * 60)
-    parking_stream_realtime(
-        duration_minutes=1,
-        event_interval=1,
-        kafka_topic="raw-data",
-        bootstrap_servers="192.168.80.60:9092",
-        exit_interval=30
+    print("""
+    ╔══════════════════════════════════════════════════════════════╗
+    ║          MULTI-CAMERA PARKING EVENT PRODUCER                 ║
+    ║     Giả lập nhiều cameras trong bãi đỗ xe                    ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """)
+
+    print(f"📹 Number of cameras: {NUM_CAMERAS}")
+    print(f"⏱  Duration: {DURATION_MINUTES} minutes")
+    print(f"📍 Kafka topic: {KAFKA_TOPIC}")
+    print(f"🔌 Kafka servers: {KAFKA_SERVERS}")
+    print(f"{'='*80}\n")
+
+    # Chạy multi-camera producer
+    multi_producer = MultiCameraProducer(
+        num_cameras=NUM_CAMERAS,
+        kafka_topic=KAFKA_TOPIC,
+        bootstrap_servers=KAFKA_SERVERS,
+        duration_minutes=DURATION_MINUTES
     )
+
+    multi_producer.run()

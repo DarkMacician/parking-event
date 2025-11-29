@@ -1,0 +1,9 @@
+{
+  "kafka_servers": "192.168.1.117:9092",
+  "num_cameras": 3,
+  "duration_minutes": 5,
+  "kafka_topic": "raw-data",
+  "output_topic_sessions": "processed-data",
+  "block_price": 10000,
+  "block_seconds": 600
+}

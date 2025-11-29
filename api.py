@@ -3,39 +3,36 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import threading
 import time
-import json
 from kafka import KafkaConsumer
-from collections import defaultdict
 import math
+import json
+
+def load_config(path="config.json"):
+    with open(path, "r") as f:
+        return json.load(f)
+
+config = load_config()
+
+BLOCK_PRICE = int(config.get("block_price"))
+BLOCK_SECONDS = int(config.get("block_seconds"))
+PROCESSED_TOPIC = config.get("output_topic_sessions")
+KAFKA_SERVERS = config.get("kafka_servers")
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-# ==========================================================
-# CONFIGURATION
-# ==========================================================
-KAFKA_SERVERS = "192.168.80.60:9092"
-PROCESSED_TOPIC = "processed-data"
-BLOCK_PRICE = 10000
-BLOCK_SECONDS = 600
-
-# Tất cả locations trong bãi
 ALL_LOCATIONS = {
     f"{row}{col}"
     for row in "ABCDEF"
     for col in range(1, 11)
 }
 
-
-# ==========================================================
-# GLOBAL STATE
-# ==========================================================
 class ParkingManager:
     def __init__(self):
-        self.active_sessions = {}  # license_plate -> session_data
-        self.closed_sessions = []  # Lịch sử sessions đã kết thúc
-        self.occupancy = set()  # Set of busy locations
+        self.active_sessions = {}
+        self.closed_sessions = []
+        self.occupancy = set()
         self.lock = threading.Lock()
 
     def update_session(self, data):
@@ -218,16 +215,6 @@ def get_location_info(location_id):
     info = manager.get_location_info(location_id)
     return jsonify(info)
 
-
-# @app.route('/api/locations/free', methods=['GET'])
-# def get_free_locations():
-#     """GET /api/locations/free - Lấy danh sách vị trí trống"""
-#     free_locs = manager.get_free_locations()
-#     return jsonify({
-#         "free_locations": free_locs,
-#         "count": len(free_locs)
-#     })
-
 @app.route('/api/locations/free', methods=['GET'])
 def get_free_locations():
     """GET /api/locations/free - Lấy danh sách vị trí trống (bao gồm vị trí CLOSED)"""
@@ -239,17 +226,6 @@ def get_free_locations():
         "free_locations": free_locs,
         "count": len(free_locs)
     })
-
-
-
-# @app.route('/api/locations/busy', methods=['GET'])
-# def get_busy_locations():
-#     """GET /api/locations/busy - Lấy danh sách vị trí đang bận"""
-#     busy_locs = manager.get_busy_locations()
-#     return jsonify({
-#         "busy_locations": busy_locs,
-#         "count": len(busy_locs)
-#     })
 
 @app.route('/api/locations/busy', methods=['GET'])
 def get_busy_locations():
@@ -391,7 +367,6 @@ def main():
 
     # Start Flask-SocketIO server
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
-
 
 if __name__ == "__main__":
     main()
