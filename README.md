@@ -3,8 +3,8 @@
 This project simulates a real-time parking lot system with three main components:
 
 - Producer: simulates multiple cameras sending parking events to Kafka (topic `raw-data`).
-- Spark Processor: processes streaming data with PySpark, builds parking sessions, calculates duration and cost, detects `CLOSED` / `TIMEOUT`, and writes to Kafka (topic `processed-data`).[^1][^2]
-- API + WebSocket: Flask + Socket.IO reads `processed-data`, manages parking state, and exposes REST API + WebSocket for a frontend.[^3][^4]
+- Spark Processor: processes streaming data with PySpark, builds parking sessions, calculates duration and cost, detects `CLOSED` / `TIMEOUT`, and writes to Kafka (topic `processed-data`).
+- API + WebSocket: Flask + Socket.IO reads `processed-data`, manages parking state, and exposes REST API + WebSocket for a frontend.
 
 ***
 
@@ -14,7 +14,7 @@ You need:
 
 - Docker and Docker Compose
 - Python 3 (for running producer and API)
-- A Kafka container (started with your own `docker-compose` file)[^1]
+- A Kafka container (started with your own `docker-compose` file)
 - A Spark cluster with Docker (spark-master + spark-worker-1 + spark-worker-2)
 
 Create a `config.json` file in the project root (same level as `task.py`, `producer.py`, `app.py`). Example:
@@ -31,7 +31,7 @@ Create a `config.json` file in the project root (same level as `task.py`, `produ
 }
 ```
 
-For submissions, you can replace real IPs with placeholders like `KAFKA_HOST:PORT`.[^5]
+For submissions, you can replace real IPs with placeholders like `KAFKA_HOST:PORT`.
 
 ***
 
@@ -43,7 +43,7 @@ In the folder that contains your Kafka `docker-compose` file (for example `kafka
 docker compose -f kafka-compose.yaml up -d
 ```
 
-Kafka will listen on the IP/port configured in the compose file (for example `xxx.xxx.xxx.xxx:xxxx`).[^1]
+Kafka will listen on the IP/port configured in the compose file (for example `xxx.xxx.xxx.xxx:xxxx`).
 
 And you need to create topics for streaming:
 
@@ -76,7 +76,7 @@ pip3 install --target /tmp/pylibs "pyarrow>=4.0.0"
 exit
 ```
 
-Repeat the same for `spark-worker-1` and `spark-worker-2`.[^6]
+Repeat the same for `spark-worker-1` and `spark-worker-2`.
 
 ### 3.3 Submit the Spark job (task.py)
 
@@ -88,8 +88,8 @@ docker exec -it spark-master bash -c "PYSPARK_PYTHON=python3 PYSPARK_DRIVER_PYTH
 
 The `task.py` job will:
 
-- Read the Kafka topic `raw-data` using `kafka_input_servers` from `config.json`.[^7][^1]
-- Use `applyInPandasWithState` grouped by `(license_plate, location)` to maintain sessions and timeouts.[^8][^9]
+- Read the Kafka topic `raw-data` using `kafka_input_servers` from `config.json`.
+- Use `applyInPandasWithState` grouped by `(license_plate, location)` to maintain sessions and timeouts.
 - Write results to the `processed-data` topic with fields:
     - `license_plate`, `location`, `start_time`, `end_time`, `duration`, `cost`, `status` (`ACTIVE`, `CLOSED`, `TIMEOUT`), `last_updated`.
 
@@ -122,7 +122,7 @@ The producer will:
     - `producer_bootstrap_servers`
 - Create multiple camera simulators (threads) and send events:
     - `ENTERING`, `PARKED`, `MOVING`, `EXITING`
-- Use `license_plate` as the Kafka message key so that all events for the same car go to the same partition.[^2][^6]
+- Use `license_plate` as the Kafka message key so that all events for the same car go to the same partition.
 
 As the producer runs, the Spark job will start printing `ACTIVE`, `CLOSED`, and `TIMEOUT` sessions to the console and writing them into Kafka.
 
@@ -149,7 +149,7 @@ python api.py
 Defaults:
 
 - REST API base URL: `http://localhost:5000/api/`
-- WebSocket namespace: `/parking`[^4][^3]
+- WebSocket namespace: `/parking`
 
 Main REST endpoints:
 
@@ -168,7 +168,7 @@ WebSocket events:
 - `statistics_update` – updated stats for dashboards.
 - `initial_data` – initial snapshot when a client connects.
 - `duration_update` – periodic real-time duration/cost updates.
-- `location_info` – detailed info for one location on demand.[^10][^3]
+- `location_info` – detailed info for one location on demand.
 
 ***
 
@@ -184,7 +184,7 @@ docker compose -f kafka-compose.yaml up -d
 docker compose up -d   # in the spark-docker directory
 ```
 
-3. (First time only) Install `pandas` and `pyarrow` in `spark-master`, `spark-worker-1`, `spark-worker-2`.[^6]
+3. (First time only) Install `pandas` and `pyarrow` in `spark-master`, `spark-worker-1`, `spark-worker-2`.
 4. Run the Spark job:
 ```bash
 docker exec -it spark-master bash -c "... spark-submit ... /opt/spark-apps/task.py"
@@ -203,7 +203,7 @@ api.py
 Once all three parts are running:
 
 - The producer continuously sends simulated camera events into Kafka.
-- Spark Structured Streaming aggregates them into parking sessions in real time.[^11][^1]
+- Spark Structured Streaming aggregates them into parking sessions in real time.
 - The API exposes the current parking lot state and history via REST and WebSocket for any frontend client.
 
 
