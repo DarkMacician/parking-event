@@ -206,27 +206,4 @@ Once all three parts are running:
 - Spark Structured Streaming aggregates them into parking sessions in real time.[^11][^1]
 - The API exposes the current parking lot state and history via REST and WebSocket for any frontend client.
 
-<div align="center">⁂</div>
-
-[^1]: https://spark.apache.org/docs/latest/structured-streaming-kafka-integration.html
-
-[^2]: https://dev.to/pizofreude/study-notes-613-14-kafka-streaming-with-python-pyspark-structured-streaming-with-kafka-1i9h
-
-[^3]: https://stackoverflow.com/questions/58530683/flask-socketio-kafka-as-a-background-process
-
-[^4]: https://flask-socketio.readthedocs.io/en/latest/deployment.html
-
-[^5]: https://towardsdatascience.com/stop-hardcoding-values-in-python-apps-use-json-configuration-files-instead-cce8f15f647a/
-
-[^6]: https://quix.io/blog/how-to-fix-common-issues-spark-structured-streaming-pyspark-kafka
-
-[^7]: https://www.alliage.io/en/academy/kafka/tutorial-kafka-spark-structured-streaming
-
-[^8]: https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.GroupedData.applyInPandasWithState.html
-
-[^9]: https://www.databricks.com/blog/python-arbitrary-stateful-processing-structured-streaming
-
-[^10]: https://gonzalo123.com/2025/02/10/creating-a-real-time-flask-application-with-flask-socketio-and-redis/
-
-[^11]: https://blog.min.io/end-to-end-spark-streaming-for-kafka/
 
